@@ -1,4 +1,3 @@
-
 import os
 import json
 import pandas as pd
@@ -6,18 +5,29 @@ import numpy as np
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 from supabase import create_client
-from dotenv import load_dotenv
 import plotly.express as px
 
-load_dotenv()
+# =========================
+# CONFIG (DEPLOY-SAFE)
+# =========================
 
-# =========================
-# CONFIG
-# =========================
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+def get_secret(name: str) -> str:
+    """
+    Produção (Streamlit Cloud): usa st.secrets
+    Local (opcional): fallback em variáveis de ambiente
+    """
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return os.getenv(name, "").strip()
+
+
+SUPABASE_URL = get_secret("SUPABASE_URL")
+SUPABASE_KEY = get_secret("SUPABASE_KEY")
+
 TABLE_OS = "os"
-
 DEFAULT_LOOKBACK_DAYS = 365
 
 # Status oficiais do teu modelo
@@ -30,7 +40,9 @@ STATUS_OS_DONE = ["CONCLUIDA"]
 # =========================
 def connect():
     if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("SUPABASE_URL e SUPABASE_KEY não estão disponíveis no ambiente.")
+        st.error("Credenciais do Supabase não encontradas.")
+        st.info("No Streamlit Cloud: Settings → Secrets → defina SUPABASE_URL e SUPABASE_KEY.")
+        st.stop()
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -80,15 +92,12 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
         df["blocked_by"] = df["blocked_by"].apply(_as_list)
 
     # =========================
-    # equipamento (jsonb) → extrair desc
+    # equipamento (jsonb) → extrair desc (fallback)
     # =========================
     if "equipamento" in df.columns:
         def _equip_desc(x):
-            # Caso venha como dict (Supabase normalmente retorna assim)
             if isinstance(x, dict):
                 return x.get("desc", "")
-
-            # Caso venha como string JSON
             if isinstance(x, str):
                 try:
                     v = json.loads(x)
@@ -96,11 +105,8 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
                         return v.get("desc", "")
                 except Exception:
                     return ""
-
             return ""
-
         df["equipamento_desc"] = df["equipamento"].apply(_equip_desc)
-
     else:
         df["equipamento_desc"] = ""
 
@@ -110,7 +116,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     df["age_days"] = (now_utc - df["created_at"]).dt.total_seconds() / 86400.0
     df["age_days"] = df["age_days"].clip(lower=0)
 
-    # Idade em horas corridas (para visões executivas)
+    # Idade em horas corridas
     df["age_hours"] = (df["age_days"] * 24.0).round(1)
 
     df["blocked_count"] = df["blocked_by"].apply(lambda lst: len(lst) if isinstance(lst, list) else 0)
@@ -252,9 +258,10 @@ if equip_q.strip():
     d = d[
         d["equip_id"].fillna("").astype(str).str.upper().str.contains(s, na=False)
         | d["equip_desc"].fillna("").astype(str).str.upper().str.contains(s, na=False)
+        | d["equipamento_desc"].fillna("").astype(str).str.upper().str.contains(s, na=False)
     ]
 
-# KPIs (executivo)
+# KPIs
 preos_abertas = d[(d["type"] == "PRE_OS") & (d["status"].isin(STATUS_PREOS_ABERTAS))]
 preos_bloq = preos_abertas[preos_abertas["status"] == "BLOQUEADA"]
 os_exec = d[(d["type"] == "OS") & (d["status"].isin(STATUS_OS_EXEC))]
@@ -272,49 +279,25 @@ k6.metric("Críticos (≥75)", f"{int((d['criticality_band']=='CRÍTICO').sum())
 st.divider()
 
 # =========================
-# MATRIZ DE CRITICIDADE (LÚDICA) + LEGENDA
+# MATRIZ DE CRITICIDADE
 # =========================
 st.subheader("Como calculamos a criticidade (leitura rápida)")
 
 matriz_ludica = pd.DataFrame(
     [
-    {
-        'Categoria': '🚨 Urgência (Prioridade)',
-        'Origem': 'prioridade',
-        'Peso máximo': 'até 40 pts',
-        'Descrição breve': 'Se foi marcado como emergencial/alta, sobe na fila.',
-    },
-    {
-        'Categoria': '🧱 Situação (Status)',
-        'Origem': 'status',
-        'Peso máximo': 'até 28 pts',
-        'Descrição breve': 'Travado (BLOQUEADA) pesa mais do que pronto (RTE).',
-    },
-    {
-        'Categoria': '⏳ Tempo aberto (Idade)',
-        'Origem': 'age_days',
-        'Peso máximo': 'até 25 pts',
-        'Descrição breve': 'Quanto mais velho, mais grave do ponto de vista de gestão.',
-    },
-    {
-        'Categoria': '🔒 Impedimentos (Bloqueios)',
-        'Origem': 'blocked_by',
-        'Peso máximo': 'até 15 pts',
-        'Descrição breve': 'Mais bloqueios = mais crítico.',
-    },
-    {
-        'Categoria': '🏭 Tipo de demanda',
-        'Origem': 'type',
-        'Peso máximo': 'até 6 pts',
-        'Descrição breve': 'OS operacional pesa mais do que Pré-OS administrativa.',
-    },
-    {
-        'Categoria': '⚠️ Gargalos clássicos',
-        'Origem': 'blocked_by (COMPRAS / SEM_CONTINGENTE)',
-        'Peso máximo': 'até 5 pts',
-        'Descrição breve': 'Se o bloqueio é compras/contingente, sobe um pouco no alerta.',
-    },
-]
+        {"Categoria": "🚨 Urgência (Prioridade)", "Origem": "prioridade", "Peso máximo": "até 40 pts",
+         "Descrição breve": "Se foi marcado como emergencial/alta, sobe na fila."},
+        {"Categoria": "🧱 Situação (Status)", "Origem": "status", "Peso máximo": "até 28 pts",
+         "Descrição breve": "Travado (BLOQUEADA) pesa mais do que pronto (RTE)."},
+        {"Categoria": "⏳ Tempo aberto (Idade)", "Origem": "age_days", "Peso máximo": "até 25 pts",
+         "Descrição breve": "Quanto mais velho, mais grave do ponto de vista de gestão."},
+        {"Categoria": "🔒 Impedimentos (Bloqueios)", "Origem": "blocked_by", "Peso máximo": "até 15 pts",
+         "Descrição breve": "Mais bloqueios = mais crítico."},
+        {"Categoria": "🏭 Tipo de demanda", "Origem": "type", "Peso máximo": "até 6 pts",
+         "Descrição breve": "OS operacional pesa mais do que Pré-OS administrativa."},
+        {"Categoria": "⚠️ Gargalos clássicos", "Origem": "blocked_by (COMPRAS / SEM_CONTINGENTE)", "Peso máximo": "até 5 pts",
+         "Descrição breve": "Se o bloqueio é compras/contingente, sobe um pouco no alerta."},
+    ]
 )
 
 st.dataframe(matriz_ludica, use_container_width=True, hide_index=True)
@@ -325,13 +308,13 @@ st.caption(
     "**ALTO (50–74)** = atenção prioritária; "
     "**MÉDIO (25–49)** = acompanhar e programar; "
     "**BAIXO (<25)** = rotina/sem urgência. "
-    "Obs.: Essa pontuação é interna, por tanto, está sujeita a revisões e remodelagens para classificar de maneira mais precisa os indíces de criticidade."
+    "Obs.: Pontuação interna, sujeita a revisões."
 )
 
 st.divider()
 
 # =========================
-# GRÁFICOS (TOTAL: 4)
+# GRÁFICOS (4)
 # =========================
 c1, c2 = st.columns([1.05, 0.95])
 
@@ -380,13 +363,10 @@ with c2:
 
     st.subheader("Mapa de calor: Status × Criticidade")
     heat = d.groupby(["status", "criticality_band"]).size().reset_index(name="qtd")
-
     band_order = ["CRÍTICO", "ALTO", "MÉDIO", "BAIXO"]
     status_order = ["BLOQUEADA", "RTE", "EM_EXECUCAO", "CONCLUIDA"]
-
     heat["criticality_band"] = pd.Categorical(heat["criticality_band"], categories=band_order, ordered=True)
     heat["status"] = pd.Categorical(heat["status"], categories=status_order, ordered=True)
-
     pivot = heat.pivot_table(index="status", columns="criticality_band", values="qtd", fill_value=0)
 
     fig_heat = px.imshow(pivot, text_auto=True, aspect="auto")
@@ -400,7 +380,7 @@ with c2:
 st.divider()
 
 # =========================
-# DETALHES (DEFAULT: GERÊNCIA)
+# DETALHES (GERÊNCIA)
 # =========================
 st.subheader("Detalhes — visão gerencial")
 
@@ -417,7 +397,6 @@ if "criticality_score" in details.columns:
 def keep_existing(df_: pd.DataFrame, cols_: list) -> list:
     return [c for c in cols_ if c in df_.columns]
 
-# Colunas pedidas (gerência)
 cols_gerencia = keep_existing(
     details,
     ["criticality_band", "equip_desc", "equipamento_desc", "classe", "tipo_intervencao", "descricao", "impacto_produtivo_emoji"]
@@ -425,7 +404,8 @@ cols_gerencia = keep_existing(
 
 rename_map = {
     "criticality_band": "Criticidade",
-    "equip_desc": "Ativo",
+    "equip_desc": "Ativo (campo)",
+    "equipamento_desc": "Ativo",
     "classe": "Classe",
     "tipo_intervencao": "Tipo de intervenção",
     "descricao": "Descrição",
@@ -442,7 +422,7 @@ with st.expander("Abrir visão PCM (detalhada)"):
         [
             "criticality_band", "criticality_score", "type", "status",
             "age_hours", "age_days", "id",
-            "equip_id", "equip_desc", "equip_cat", "equip_gr",
+            "equip_id", "equip_desc", "equipamento_desc", "equip_cat", "equip_gr",
             "cc", "frota", "solicitante",
             "classe", "motivo", "tipo_intervencao", "prioridade_norm",
             "blocked_str", "purchase_ref_type", "purchase_ref_no", "purchase_eta", "purchase_note",
